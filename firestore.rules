@@ -1,0 +1,64 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: gymrats_users
+    // Fields:
+    //   - name: string (required)
+    //   - target: number (required, 1-7)
+    //   - totalPaid: number
+    //   - pix: string
+    //   - activities: list (7 elements)
+    //   - history: list
+    //   - createdAt: number
+    //   - uid: string
+    //
+    // Collection: app_settings
+    // Fields:
+    //   - icons: map
+    //   - templates: map
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        (request.auth.token.email == "davi.caseira@gmail.com" && request.auth.token.email_verified == true);
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && (request.auth.uid == userId || request.auth.uid == resource.data.uid);
+    }
+
+    function isValidUser(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.target is number && data.target >= 1 && data.target <= 7;
+    }
+
+    // Rules for gymrats_users
+    match /gymrats_users/{userId} {
+      // Qualquer pessoa autenticada pode ler a lista de atletas (placar público do grupo)
+      allow read: if isAuthenticated();
+      
+      // Apenas admins podem criar ou deletar usuários (ou o próprio usuário se implementarmos auto-registro)
+      allow create: if isAuthenticated() && isValidUser(request.resource.data);
+      allow update: if isAuthenticated() && isValidUser(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    // Rules for app_settings
+    match /app_settings/{settingId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+  }
+}

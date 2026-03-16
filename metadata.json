@@ -1,0 +1,5 @@
+{
+  "name": "GymCaps",
+  "description": "Aplicativo para coordenar grupos de atividades físicas, com rastreamento de frequência e gestão de metas.",
+  "requestFramePermissions": []
+}

@@ -1,0 +1,82 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Atleta do grupo GymCaps",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Nome do atleta"
+        },
+        "target": {
+          "type": "integer",
+          "description": "Meta semanal de dias de treino"
+        },
+        "totalPaid": {
+          "type": "number",
+          "description": "Total pago em multas acumulado"
+        },
+        "pix": {
+          "type": "string",
+          "description": "Chave Pix para recebimento de prêmios"
+        },
+        "activities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Array de 7 posições com datas (YYYY-MM-DD) ou false"
+        },
+        "history": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "weekId": { "type": "string" },
+              "date": { "type": "number" },
+              "target": { "type": "integer" },
+              "count": { "type": "integer" },
+              "fine": { "type": "number" }
+            }
+          },
+          "description": "Histórico de semanas fechadas"
+        },
+        "createdAt": {
+          "type": "number",
+          "description": "Timestamp de criação"
+        },
+        "uid": {
+          "type": "string",
+          "description": "UID do usuário no Firebase Auth (se vinculado)"
+        }
+      },
+      "required": ["name", "target"]
+    },
+    "AppSettings": {
+      "title": "App Settings",
+      "description": "Configurações globais do aplicativo",
+      "type": "object",
+      "properties": {
+        "icons": {
+          "type": "object",
+          "description": "Ícones personalizados"
+        },
+        "templates": {
+          "type": "object",
+          "description": "Modelos de texto para relatórios"
+        }
+      }
+    }
+  },
+  "firestore": {
+    "/gymrats_users/{userId}": {
+      "schema": "User",
+      "description": "Coleção de atletas"
+    },
+    "/app_settings/global": {
+      "schema": "AppSettings",
+      "description": "Configurações globais"
+    }
+  }
+}
