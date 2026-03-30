@@ -8,15 +8,14 @@ import {
   Trophy, Dumbbell, Trash2, Plus, RefreshCw, DollarSign, Share2, Loader2, X, 
   Save, ArrowDownUp, PiggyBank, CalendarClock, FileText, Download, Copy, 
   QrCode, CheckCircle, AlertTriangle, Settings, Volume2, VolumeX, 
-  AlertOctagon, Edit3, Type, Database, ArrowUp, ArrowDown, LogOut, LogIn
+  AlertOctagon, Edit3, Type, Database, ArrowUp, ArrowDown, LogOut, LogIn, AlertCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  auth, db, googleProvider, signInWithPopup, onAuthStateChanged, signOut 
-} from './firebase';
+import { db, auth, googleProvider } from './firebase';
 import { 
   collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, writeBatch, query, setDoc, getDocFromServer
 } from 'firebase/firestore';
+import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 
 // --- Constants & Defaults ---
 const APP_ID = 'gymrats-grupo';
@@ -141,8 +140,8 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
 
 // --- Main App Component ---
 export default function App() {
-  const [user, setUser] = useState<any>(null);
-  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
   const [usersData, setUsersData] = useState<any[]>([]);
   const [appSettings, setAppSettings] = useState<any>({ icons: DEFAULT_ICONS, templates: DEFAULT_TEMPLATES });
   const [newName, setNewName] = useState('');
@@ -165,6 +164,7 @@ export default function App() {
   // Modals
   const [closingModalOpen, setClosingModalOpen] = useState(false);
   const [closingReport, setClosingReport] = useState<any>(null);
+  const [dbError, setDbError] = useState<string | null>(null);
 
   const currentWeek = getWeekNumber(new Date());
   const weekRange = getWeekRange();
@@ -185,19 +185,23 @@ export default function App() {
 
   // Auth Listener
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setIsAuthReady(true);
-      if (!u) setLoading(false);
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setAuthReady(true);
     });
     return () => unsubscribe();
   }, []);
 
   // Firestore Listener
   useEffect(() => {
-    if (!isAuthReady || !user) return;
-
+    if (!authReady) return;
+    if (!user) {
+      setLoading(false);
+      return;
+    }
+    
     setLoading(true);
+    setDbError(null);
     const q = query(collection(db, 'gymrats_users'));
     const unsubscribeUsers = onSnapshot(q, (snapshot) => {
       const users: any[] = [];
@@ -206,9 +210,15 @@ export default function App() {
       });
       setUsersData(users);
       setLoading(false);
-    }, (error) => {
+      setDbError(null);
+    }, (error: any) => {
       console.error("Erro Firestore Users:", error);
       setLoading(false);
+      if (error.message?.includes('Missing or insufficient permissions')) {
+        setDbError("Erro de Permissão: O banco de dados está bloqueando o acesso. Verifique as regras do Firestore no console do Firebase.");
+      } else {
+        setDbError("Erro ao carregar dados: " + error.message);
+      }
     });
 
     const unsubscribeSettings = onSnapshot(doc(db, 'app_settings', 'global'), (docSnap) => {
@@ -225,25 +235,9 @@ export default function App() {
       unsubscribeUsers();
       unsubscribeSettings();
     };
-  }, [isAuthReady, user]);
+  }, [authReady, user]);
 
   // --- Handlers ---
-  const handleLogin = async () => {
-    try {
-      await signInWithPopup(auth, googleProvider);
-    } catch (error) {
-      console.error("Login Error:", error);
-    }
-  };
-
-  const handleLogout = async () => {
-    try {
-      await signOut(auth);
-    } catch (error) {
-      console.error("Logout Error:", error);
-    }
-  };
-
   const showToast = (message: string, type = 'success') => {
     setToast({ message, type });
     playSound('success', soundEnabled);
@@ -279,7 +273,11 @@ export default function App() {
         activities: [false, false, false, false, false, false, false],
         history: [],
         createdAt: Date.now(),
-        uid: user.uid
+        uid: user.uid,
+        createdByName: user.displayName,
+        lastModifiedBy: user.uid,
+        lastModifiedByName: user.displayName,
+        lastModifiedAt: Date.now()
       });
       setNewName('');
       showToast('Atleta adicionado!');
@@ -289,7 +287,7 @@ export default function App() {
   };
 
   const removeUser = async (id: string) => {
-    if (!user || !confirm("Remover este atleta permanentemente?")) return;
+    if (!confirm("Remover este atleta permanentemente?")) return;
     playSound('delete', soundEnabled);
     try {
       await deleteDoc(doc(db, 'gymrats_users', id));
@@ -316,14 +314,17 @@ export default function App() {
   };
 
   const saveEdit = async () => {
-    if (!user || !editingId) return;
+    if (!editingId || !user) return;
     playSound('success', soundEnabled);
     try {
       const updateData: any = {
         name: editName,
         target: Math.min(7, Math.max(1, editTarget)),
         totalPaid: Number(editTotalPaid) || 0,
-        pix: editPix
+        pix: editPix,
+        lastModifiedBy: user.uid,
+        lastModifiedByName: user.displayName,
+        lastModifiedAt: Date.now()
       };
       if (editCreatedAt) {
         updateData.createdAt = new Date(editCreatedAt).getTime();
@@ -352,7 +353,12 @@ export default function App() {
       newActivities[dayIndex] = targetDate.toISOString().split('T')[0];
     }
     try {
-      await updateDoc(doc(db, 'gymrats_users', userId), { activities: newActivities });
+      await updateDoc(doc(db, 'gymrats_users', userId), { 
+        activities: newActivities,
+        lastModifiedBy: user.uid,
+        lastModifiedByName: user.displayName,
+        lastModifiedAt: Date.now()
+      });
     } catch (error) {
       console.error("Toggle Activity Error:", error);
     }
@@ -407,7 +413,6 @@ export default function App() {
 
   // --- Closing Week Logic ---
   const openCloseWeekModal = () => {
-    if (!user) return;
     playSound('click', soundEnabled);
     const { sorted, totalPot, winners, prizePerWinner } = statsData;
     
@@ -427,6 +432,7 @@ export default function App() {
   };
 
   const confirmCloseWeek = async () => {
+    if (!user) return;
     setLoading(true);
     const weekId = `W${currentWeek}-${new Date().getFullYear()}`;
     try {
@@ -448,7 +454,10 @@ export default function App() {
         batch.update(doc(db, 'gymrats_users', u.id), { 
           activities: [false, false, false, false, false, false, false],
           totalPaid: (u.totalPaid || 0) + fine,
-          history: newHistory
+          history: newHistory,
+          lastModifiedBy: user.uid,
+          lastModifiedByName: user.displayName,
+          lastModifiedAt: Date.now()
         });
       });
       await batch.commit();
@@ -490,8 +499,26 @@ export default function App() {
     copyToClipboard(text);
   };
 
+  // --- Auth Handlers ---
+  const handleLogin = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (error) {
+      console.error("Login Error:", error);
+      showToast("Erro ao fazer login", "error");
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (error) {
+      console.error("Logout Error:", error);
+    }
+  };
+
   // --- Render ---
-  if (!isAuthReady || loading) {
+  if (!authReady || loading) {
     return (
       <div className="min-h-screen bg-slate-900 flex items-center justify-center text-slate-400">
         <Loader2 className="animate-spin mr-2" /> Carregando...
@@ -501,24 +528,30 @@ export default function App() {
 
   if (!user) {
     return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="bg-slate-800 p-8 rounded-3xl border border-slate-700 shadow-2xl max-w-md w-full text-center"
-        >
-          <div className="w-20 h-20 bg-orange-500 rounded-2xl mx-auto mb-6 flex items-center justify-center shadow-lg shadow-orange-500/20">
-            <Dumbbell className="text-white" size={40} />
+      <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center text-slate-100 p-4 font-sans">
+        <div className="max-w-sm w-full bg-slate-800 p-8 rounded-3xl border border-slate-700 text-center space-y-6 shadow-2xl">
+          <div className="flex justify-center">
+            <div className="w-20 h-20 bg-orange-500/20 rounded-full flex items-center justify-center">
+              <Dumbbell className="text-orange-500 w-10 h-10" />
+            </div>
           </div>
-          <h1 className="text-3xl font-bold text-white mb-2">GymCaps</h1>
-          <p className="text-slate-400 mb-8">Coordene seu grupo de treino com capivaras focadas!</p>
+          <div>
+            <h1 className="text-3xl font-bold text-white mb-2">GymCaps</h1>
+            <p className="text-slate-400 text-sm">Faça login para acessar o placar e registrar suas atividades.</p>
+          </div>
           <button 
             onClick={handleLogin}
-            className="w-full bg-white text-slate-900 font-bold py-4 rounded-xl flex items-center justify-center gap-3 hover:bg-slate-100 transition shadow-lg"
+            className="w-full bg-white text-slate-900 hover:bg-slate-100 font-semibold py-3 px-4 rounded-xl flex items-center justify-center gap-3 transition-colors shadow-lg"
           >
-            <LogIn size={20} /> Entrar com Google
+            <svg className="w-5 h-5" viewBox="0 0 24 24">
+              <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+            </svg>
+            Entrar com Google
           </button>
-        </motion.div>
+        </div>
       </div>
     );
   }
@@ -528,6 +561,16 @@ export default function App() {
       <div className="min-h-screen bg-slate-900 text-slate-100 p-4 font-sans selection:bg-orange-500 selection:text-white pb-24">
         <div className="max-w-md mx-auto space-y-6">
           
+          {dbError && (
+            <div className="bg-red-900/50 border border-red-500 text-red-200 p-4 rounded-xl text-sm font-medium">
+              <div className="flex items-center gap-2 mb-1">
+                <AlertCircle size={16} className="text-red-400" />
+                <span className="font-bold text-red-400">Erro de Conexão</span>
+              </div>
+              {dbError}
+            </div>
+          )}
+
           {/* Header */}
           <div className="flex flex-col gap-1">
             <div className="flex items-center justify-between">
@@ -541,7 +584,7 @@ export default function App() {
                 <button onClick={openCloseWeekModal} className="p-2 text-slate-400 hover:text-red-400 transition">
                   <RefreshCw size={20} />
                 </button>
-                <button onClick={handleLogout} className="p-2 text-slate-400 hover:text-white transition">
+                <button onClick={handleLogout} className="p-2 text-slate-400 hover:text-white transition" title="Sair">
                   <LogOut size={20} />
                 </button>
               </div>
