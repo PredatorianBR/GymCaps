@@ -8,7 +8,7 @@ import {
   Trophy, Dumbbell, Trash2, Plus, RefreshCw, DollarSign, Share2, Loader2, X, 
   Save, ArrowDownUp, PiggyBank, CalendarClock, FileText, Download, Copy, 
   QrCode, CheckCircle, AlertTriangle, Settings, Volume2, VolumeX, 
-  AlertOctagon, Edit3, Type, Database, ArrowUp, ArrowDown, LogOut, LogIn, AlertCircle
+  AlertOctagon, Edit3, Type, Database, ArrowUp, ArrowDown, LogOut, LogIn, AlertCircle, Users
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { db, auth, googleProvider } from './firebase';
@@ -16,6 +16,57 @@ import {
   collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, writeBatch, query, setDoc, getDocFromServer
 } from 'firebase/firestore';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string;
+    email?: string | null;
+    emailVerified?: boolean;
+    isAnonymous?: boolean;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 // --- Constants & Defaults ---
 const APP_ID = 'gymrats-grupo';
@@ -149,9 +200,15 @@ export default function App() {
   const [sortBy, setSortBy] = useState<'name' | 'frequency' | 'fine'>('name'); 
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc'); 
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<'icons' | 'templates' | 'reports'>('icons');
+  const [settingsTab, setSettingsTab] = useState<'icons' | 'templates' | 'reports' | 'users'>('icons');
   const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem('gymcapy_sound') !== 'false');
   const [toast, setToast] = useState<{ message: string, type: string } | null>(null);
+  const [showLogsModal, setShowLogsModal] = useState(false);
+
+  // App Users State
+  const [appUsers, setAppUsers] = useState<any[]>([]);
+  const [newAppUserEmail, setNewAppUserEmail] = useState('');
+  const [newAppUserRole, setNewAppUserRole] = useState('editor');
 
   // Editing State
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -165,6 +222,7 @@ export default function App() {
   const [closingModalOpen, setClosingModalOpen] = useState(false);
   const [closingReport, setClosingReport] = useState<any>(null);
   const [dbError, setDbError] = useState<string | null>(null);
+  const [userToDelete, setUserToDelete] = useState<string | null>(null);
 
   const currentWeek = getWeekNumber(new Date());
   const weekRange = getWeekRange();
@@ -214,11 +272,7 @@ export default function App() {
     }, (error: any) => {
       console.error("Erro Firestore Users:", error);
       setLoading(false);
-      if (error.message?.includes('Missing or insufficient permissions')) {
-        setDbError("Erro de Permissão: O banco de dados está bloqueando o acesso. Verifique as regras do Firestore no console do Firebase.");
-      } else {
-        setDbError("Erro ao carregar dados: " + error.message);
-      }
+      handleFirestoreError(error, OperationType.LIST, 'gymrats_users');
     });
 
     const unsubscribeSettings = onSnapshot(doc(db, 'app_settings', 'global'), (docSnap) => {
@@ -229,13 +283,102 @@ export default function App() {
           templates: { ...DEFAULT_TEMPLATES, ...data.templates }
         });
       }
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'app_settings/global');
+    });
+
+    const unsubscribeAppUsers = onSnapshot(collection(db, 'app_users'), (snapshot) => {
+      const list: any[] = [];
+      snapshot.docs.forEach(d => list.push({ id: d.id, ...d.data() }));
+      setAppUsers(list);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'app_users');
     });
 
     return () => {
       unsubscribeUsers();
       unsubscribeSettings();
+      unsubscribeAppUsers();
     };
   }, [authReady, user]);
+
+  // --- RBAC (Role-Based Access Control) ---
+  const currentUserRole = useMemo(() => {
+    if (!user) return 'viewer';
+    if (user.email === 'davi.caseira@gmail.com') return 'admin';
+    const found = appUsers.find(u => u.id === user.email);
+    return found ? found.role : 'viewer';
+  }, [user, appUsers]);
+
+  const canEdit = currentUserRole === 'admin' || currentUserRole === 'editor';
+  const canDelete = currentUserRole === 'admin';
+
+  const addAppUser = async () => {
+    if (!newAppUserEmail.trim()) return;
+    playSound('click', soundEnabled);
+    const email = newAppUserEmail.toLowerCase();
+    try {
+      await setDoc(doc(db, 'app_users', email), {
+        email: email,
+        role: newAppUserRole,
+        addedBy: user?.email,
+        addedAt: Date.now()
+      });
+      setNewAppUserEmail('');
+      showToast('Usuário salvo com sucesso!');
+    } catch (error) {
+      console.error("Add App User Error:", error);
+      showToast('Erro ao salvar usuário', 'error');
+      handleFirestoreError(error, OperationType.WRITE, `app_users/${email}`);
+    }
+  };
+
+  const removeAppUser = async (email: string) => {
+    if (!confirm(`Remover acesso de ${email}?`)) return;
+    playSound('delete', soundEnabled);
+    try {
+      await deleteDoc(doc(db, 'app_users', email));
+      showToast('Usuário removido!');
+    } catch (error) {
+      console.error("Remove App User Error:", error);
+      showToast('Erro ao remover usuário', 'error');
+      handleFirestoreError(error, OperationType.DELETE, `app_users/${email}`);
+    }
+  };
+
+  const exportData = () => {
+    const csvContent = [
+      ['Nome', 'Meta', 'Frequência', 'Multa', 'Dias Ativos'].join(','),
+      ...usersData.map(u => [
+        u.name,
+        u.userTarget,
+        u.count,
+        u.fine,
+        u.activities?.filter(Boolean).length || 0
+      ].join(','))
+    ].join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `gymcaps_export_${new Date().toISOString().split('T')[0]}.csv`;
+    link.click();
+  };
+
+  const clearAllData = async () => {
+    if (!confirm('ATENÇÃO: Isso apagará TODOS os atletas. Tem certeza absoluta?')) return;
+    
+    try {
+      for (const u of usersData) {
+        await deleteDoc(doc(db, 'gymrats_users', u.id));
+      }
+      showToast('Todos os dados foram apagados', 'success');
+    } catch (error) {
+      console.error("Clear data error:", error);
+      showToast('Erro ao apagar dados', 'error');
+      handleFirestoreError(error, OperationType.DELETE, 'gymrats_users');
+    }
+  };
 
   // --- Handlers ---
   const showToast = (message: string, type = 'success') => {
@@ -283,18 +426,26 @@ export default function App() {
       showToast('Atleta adicionado!');
     } catch (error) {
       console.error("Add User Error:", error);
+      handleFirestoreError(error, OperationType.CREATE, 'gymrats_users');
     }
   };
 
-  const removeUser = async (id: string) => {
-    if (!confirm("Remover este atleta permanentemente?")) return;
+  const requestRemoveUser = (id: string) => {
+    playSound('click', soundEnabled);
+    setUserToDelete(id);
+  };
+
+  const confirmRemoveUser = async () => {
+    if (!userToDelete) return;
     playSound('delete', soundEnabled);
     try {
-      await deleteDoc(doc(db, 'gymrats_users', id));
+      await deleteDoc(doc(db, 'gymrats_users', userToDelete));
       setEditingId(null);
+      setUserToDelete(null);
       showToast('Atleta removido.');
     } catch (error) {
       console.error("Remove User Error:", error);
+      handleFirestoreError(error, OperationType.DELETE, `gymrats_users/${userToDelete}`);
     }
   };
 
@@ -334,6 +485,7 @@ export default function App() {
       showToast('Dados atualizados!');
     } catch (error) {
       console.error("Update User Error:", error);
+      handleFirestoreError(error, OperationType.UPDATE, `gymrats_users/${editingId}`);
     }
   };
 
@@ -361,6 +513,7 @@ export default function App() {
       });
     } catch (error) {
       console.error("Toggle Activity Error:", error);
+      handleFirestoreError(error, OperationType.UPDATE, `gymrats_users/${userId}`);
     }
   };
 
@@ -465,6 +618,7 @@ export default function App() {
       showToast('Semana fechada com sucesso!');
     } catch (error) {
       console.error("Close Week Error:", error);
+      handleFirestoreError(error, OperationType.WRITE, 'gymrats_users');
     } finally {
       setLoading(false);
     }
@@ -496,6 +650,42 @@ export default function App() {
     });
 
     text += `\n💰 *Pote Total:* R$ ${totalPot},00\n`;
+    copyToClipboard(text);
+  };
+
+  const handleExportReport = () => {
+    if (!closingReport) return;
+    const { sorted, maxCount } = statsData;
+    let text = `*💪 PLACAR SEMANAL GYMCAPYBARAS 💪*\n📅 ${weekRange}\n\n`;
+
+    const sortedUsers = [...sorted].sort((a, b) => a.name.localeCompare(b.name));
+    
+    sortedUsers.forEach(u => {
+      const isLeader = u.count > 0 && u.count === maxCount;
+      let medalha = isLeader ? appSettings.icons.leader : (u.fine > 0 ? '💸' : (u.count >= u.userTarget ? appSettings.icons.met : appSettings.icons.unmet));
+      
+      let activeCount = 0;
+      const iconesDias = (u.activities || []).map((val: any) => {
+        if (!val) return appSettings.icons.empty;
+        activeCount++;
+        return activeCount > u.userTarget ? appSettings.icons.extra : appSettings.icons.check;
+      }).join('');
+
+      text += `${medalha}  ${iconesDias} *${u.name}* (${u.count}/${u.userTarget})\n`;
+    });
+
+    text += `\n----------------\n💰 *Pote Total:* R$ ${closingReport.totalPot.toFixed(2).replace('.', ',')}\n\n`;
+
+    text += `🏆 *RECEBEM (Saldo Positivo):*\n`;
+    closingReport.receivers.forEach((u: any) => {
+      text += `- ${u.name}: Ganha R$ ${u.net.toFixed(2)}\n`;
+    });
+
+    text += `\n📉 *PAGAM (Saldo Devedor):*\n`;
+    closingReport.payers.forEach((u: any) => {
+      text += `- ${u.name}: Paga R$ ${Math.abs(u.net).toFixed(2)}\n`;
+    });
+
     copyToClipboard(text);
   };
 
@@ -581,9 +771,11 @@ export default function App() {
                 <button onClick={() => setShowSettings(true)} className="p-2 text-slate-400 hover:text-white transition">
                   <Settings size={20} />
                 </button>
-                <button onClick={openCloseWeekModal} className="p-2 text-slate-400 hover:text-red-400 transition">
-                  <RefreshCw size={20} />
-                </button>
+                {canEdit && (
+                  <button onClick={openCloseWeekModal} className="p-2 text-slate-400 hover:text-red-400 transition">
+                    <RefreshCw size={20} />
+                  </button>
+                )}
                 <button onClick={handleLogout} className="p-2 text-slate-400 hover:text-white transition" title="Sair">
                   <LogOut size={20} />
                 </button>
@@ -678,9 +870,11 @@ export default function App() {
                           />
                         </div>
                         <div className="flex gap-2 justify-between mt-6 pt-4 border-t border-slate-700">
-                          <button onClick={() => removeUser(u.id)} className="text-red-400 hover:bg-red-900/20 p-2 rounded-xl transition">
-                            <Trash2 size={20} />
-                          </button>
+                          {canDelete ? (
+                            <button onClick={() => requestRemoveUser(u.id)} className="text-red-400 hover:bg-red-900/20 p-2 rounded-xl transition">
+                              <Trash2 size={20} />
+                            </button>
+                          ) : <div />}
                           <div className="flex gap-2">
                             <button onClick={() => setEditingId(null)} className="p-3 text-slate-400 hover:text-white">
                               <X size={20} />
@@ -709,8 +903,8 @@ export default function App() {
                       <div className="flex items-center gap-3">
                         {isLeader && <span className="text-xl">{appSettings.icons.leader}</span>}
                         <span 
-                          onClick={() => startEditing(u)}
-                          className="font-bold text-lg cursor-pointer hover:text-orange-400 transition"
+                          onClick={() => canEdit && startEditing(u)}
+                          className={`font-bold text-lg transition ${canEdit ? 'cursor-pointer hover:text-orange-400' : ''}`}
                         >
                           {u.name}
                         </span>
@@ -734,12 +928,12 @@ export default function App() {
                         return (
                           <button
                             key={idx}
-                            onClick={() => toggleActivity(u.id, idx, u.activities)}
+                            onClick={() => canEdit && toggleActivity(u.id, idx, u.activities)}
                             className={`flex-1 h-12 rounded-xl flex flex-col items-center justify-center transition-all ${
                               isActive 
                                 ? 'bg-gradient-to-br from-orange-500 to-amber-600 text-white shadow-lg shadow-orange-500/20' 
-                                : 'bg-slate-700/30 text-slate-500 hover:bg-slate-700/50'
-                            }`}
+                                : 'bg-slate-700/30 text-slate-500'
+                            } ${canEdit && !isActive ? 'hover:bg-slate-700/50' : ''}`}
                           >
                             <span className="text-[10px] font-black">{day}</span>
                             {isActive && <div className="w-1 h-1 bg-white/50 rounded-full mt-1" />}
@@ -754,17 +948,19 @@ export default function App() {
           </div>
 
           {/* Add Athlete Input */}
-          <div className="flex gap-2">
-            <input
-              type="text" value={newName} onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && addUser()}
-              placeholder="Nome do novo atleta..."
-              className="flex-1 bg-slate-800 border border-slate-700 rounded-2xl px-5 py-3 focus:outline-none focus:border-orange-500 transition"
-            />
-            <button onClick={addUser} className="bg-orange-600 hover:bg-orange-500 p-4 rounded-2xl transition shadow-lg shadow-orange-900/20">
-              <Plus color="white" />
-            </button>
-          </div>
+          {canEdit && (
+            <div className="flex gap-2">
+              <input
+                type="text" value={newName} onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && addUser()}
+                placeholder="Nome do novo atleta..."
+                className="flex-1 bg-slate-800 border border-slate-700 rounded-2xl px-5 py-3 focus:outline-none focus:border-orange-500 transition"
+              />
+              <button onClick={addUser} className="bg-orange-600 hover:bg-orange-500 p-4 rounded-2xl transition shadow-lg shadow-orange-900/20">
+                <Plus color="white" />
+              </button>
+            </div>
+          )}
 
           <div className="text-center text-slate-600 text-[10px] pt-8">
             GymCaps &copy; {new Date().getFullYear()} • Foco Capivara
@@ -779,9 +975,9 @@ export default function App() {
                 initial={{ opacity: 0, scale: 0.9 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.9 }}
-                className="bg-slate-800 rounded-3xl max-w-sm w-full max-h-[80vh] border border-slate-700 shadow-2xl overflow-hidden flex flex-col"
+                className="bg-slate-800 rounded-3xl max-w-sm w-full h-[650px] max-h-[90vh] border border-slate-700 shadow-2xl overflow-hidden flex flex-col"
               >
-                <div className="p-6 border-b border-slate-700 flex justify-between items-center">
+                <div className="p-6 border-b border-slate-700 flex justify-between items-center shrink-0">
                   <h3 className="text-lg font-bold text-white flex items-center gap-2">
                     <Settings size={20} /> Configurações
                   </h3>
@@ -790,54 +986,210 @@ export default function App() {
                   </button>
                 </div>
                 
-                <div className="flex border-b border-slate-700">
-                  {(['icons', 'templates', 'reports'] as const).map(tab => (
+                <div className="flex border-b border-slate-700 shrink-0">
+                  {(currentUserRole === 'admin' ? ['icons', 'templates', 'reports', 'users'] : ['icons', 'templates', 'reports']).map(tab => (
                     <button 
                       key={tab}
-                      onClick={() => setSettingsTab(tab)}
+                      onClick={() => setSettingsTab(tab as any)}
                       className={`flex-1 py-4 text-xs font-bold uppercase tracking-wider ${
                         settingsTab === tab ? 'bg-slate-700/50 text-orange-400 border-b-2 border-orange-500' : 'text-slate-500'
                       }`}
                     >
-                      {tab === 'icons' ? 'Ícones' : tab === 'templates' ? 'Modelos' : 'Dados'}
+                      {tab === 'icons' ? 'Ícones e Sons' : tab === 'templates' ? 'Modelos' : tab === 'users' ? 'Usuários' : 'Dados'}
                     </button>
                   ))}
                 </div>
 
-                <div className="p-6 space-y-6 overflow-y-auto">
-                  <div className="flex justify-between items-center">
-                    <div className="flex items-center gap-3 text-slate-300">
-                      {soundEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
-                      Efeitos Sonoros
+                <div className="p-6 space-y-6 overflow-y-auto flex-1">
+                  {settingsTab === 'templates' && (
+                    <div className="space-y-6 flex flex-col h-full">
+                      {Object.entries(appSettings.templates).map(([key, val]: any) => {
+                        const title = key === 'weeklyLine' ? 'Linha do Placar Semanal' : key === 'generalLine' ? 'Linha do Relatório Geral' : key;
+                        return (
+                          <div key={key} className="space-y-2 flex flex-col flex-1">
+                            <span className="text-sm font-bold text-slate-300">{title}</span>
+                            <textarea 
+                              value={val}
+                              disabled={!canEdit}
+                              onChange={(e) => setAppSettings({ ...appSettings, templates: { ...appSettings.templates, [key]: e.target.value } })}
+                              className="w-full flex-1 bg-slate-900 border border-slate-700 rounded-xl p-4 text-sm min-h-[150px] disabled:opacity-50 focus:border-orange-500 outline-none resize-none"
+                            />
+                          </div>
+                        );
+                      })}
                     </div>
-                    <button 
-                      onClick={toggleSound}
-                      className={`w-12 h-6 rounded-full p-1 transition-colors ${soundEnabled ? 'bg-orange-500' : 'bg-slate-600'}`}
-                    >
-                      <div className={`w-4 h-4 bg-white rounded-full transition-transform ${soundEnabled ? 'translate-x-6' : 'translate-x-0'}`} />
-                    </button>
-                  </div>
+                  )}
 
                   {settingsTab === 'reports' && (
-                    <div className="space-y-3">
-                      <button onClick={handleShareScoreboard} className="w-full py-4 bg-slate-700 hover:bg-slate-600 rounded-2xl text-sm font-bold flex items-center justify-center gap-2">
-                        <Share2 size={18} /> Compartilhar Placar
-                      </button>
+                    <div className="space-y-4 flex flex-col h-full">
+                      <div className="space-y-3">
+                        <button onClick={exportData} className="w-full py-4 bg-slate-700 hover:bg-slate-600 rounded-2xl text-sm font-bold flex items-center justify-center gap-2">
+                          <Download size={18} /> Baixar CSV
+                        </button>
+                        <button onClick={handleShareScoreboard} className="w-full py-4 bg-slate-700 hover:bg-slate-600 rounded-2xl text-sm font-bold flex items-center justify-center gap-2">
+                          <Share2 size={18} /> Compartilhar Placar Geral
+                        </button>
+                        <button onClick={() => setShowLogsModal(true)} className="w-full py-4 bg-slate-700 hover:bg-slate-600 rounded-2xl text-sm font-bold flex items-center justify-center gap-2">
+                          <FileText size={18} /> Log de Alterações
+                        </button>
+                      </div>
+
+                      {canDelete && (
+                        <div className="bg-red-900/20 p-4 rounded-xl border border-red-900/50 mt-auto">
+                          <h4 className="text-sm font-bold text-red-400 mb-2">Zona de Perigo</h4>
+                          <p className="text-xs text-slate-400 mb-4">Apagar todos os dados. Esta ação não pode ser desfeita.</p>
+                          <button 
+                            onClick={clearAllData}
+                            className="w-full bg-red-600/20 hover:bg-red-600/40 text-red-400 font-bold py-3 rounded-xl transition flex items-center justify-center gap-2 border border-red-600/50"
+                          >
+                            <AlertTriangle size={18} /> Apagar Tudo
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
 
                   {settingsTab === 'icons' && (
-                    <div className="space-y-4">
-                      {Object.entries(appSettings.icons).map(([key, val]: any) => (
-                        <div key={key} className="flex items-center justify-between">
-                          <span className="text-sm text-slate-400 capitalize">{key}</span>
-                          <input 
-                            value={val}
-                            onChange={(e) => setAppSettings({ ...appSettings, icons: { ...appSettings.icons, [key]: e.target.value } })}
-                            className="w-12 bg-slate-900 border border-slate-700 rounded-lg p-2 text-center"
-                          />
+                    <div className="space-y-6">
+                      <div className="flex justify-between items-center bg-slate-900 p-4 rounded-xl border border-slate-700">
+                        <div className="flex items-center gap-3 text-slate-300">
+                          {soundEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
+                          <span className="font-medium">Efeitos Sonoros</span>
                         </div>
-                      ))}
+                        <button 
+                          onClick={toggleSound}
+                          className={`w-12 h-6 rounded-full p-1 transition-colors ${soundEnabled ? 'bg-orange-500' : 'bg-slate-600'}`}
+                        >
+                          <div className={`w-4 h-4 bg-white rounded-full transition-transform ${soundEnabled ? 'translate-x-6' : 'translate-x-0'}`} />
+                        </button>
+                      </div>
+
+                      <div className="space-y-4">
+                        <h4 className="text-sm font-bold text-white mb-2">Personalizar Ícones</h4>
+                        {Object.entries(appSettings.icons).map(([key, val]: any) => {
+                          const iconNames: Record<string, string> = {
+                            leader: 'Líder',
+                            met: 'Meta Atingida',
+                            unmet: 'Meta Não Atingida',
+                            check: 'Concluído',
+                            empty: 'Não Concluído',
+                            extra: 'Extra'
+                          };
+                          const title = iconNames[key] || key;
+                          return (
+                            <div key={key} className="flex items-center justify-between">
+                              <span className="text-sm text-slate-400">{title}</span>
+                              <input 
+                                value={val}
+                                disabled={!canEdit}
+                                onChange={(e) => setAppSettings({ ...appSettings, icons: { ...appSettings.icons, [key]: e.target.value } })}
+                                className="w-12 bg-slate-900 border border-slate-700 rounded-lg p-2 text-center disabled:opacity-50"
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {settingsTab === 'users' && currentUserRole === 'admin' && (
+                    <div className="space-y-6">
+                      <div className="bg-slate-900 p-4 rounded-2xl border border-slate-700 space-y-3">
+                        <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                          <Users size={16} className="text-orange-500" /> Adicionar Acesso
+                        </h4>
+                        <input 
+                          type="email" 
+                          placeholder="E-mail do usuário" 
+                          value={newAppUserEmail}
+                          onChange={e => setNewAppUserEmail(e.target.value)}
+                          className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-sm focus:border-orange-500 outline-none"
+                        />
+                        <select 
+                          value={newAppUserRole}
+                          onChange={e => setNewAppUserRole(e.target.value)}
+                          className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-sm focus:border-orange-500 outline-none text-white"
+                        >
+                          <option value="editor">Editor (Pode alterar dados)</option>
+                          <option value="admin">Admin (Acesso total)</option>
+                          <option value="viewer">Visualizador (Apenas leitura)</option>
+                        </select>
+                        <button 
+                          onClick={addAppUser}
+                          className="w-full bg-orange-600 hover:bg-orange-500 text-white font-bold py-3 rounded-xl transition"
+                        >
+                          Adicionar / Atualizar
+                        </button>
+                      </div>
+
+                      <div className="space-y-3">
+                        <h4 className="text-sm font-bold text-white">Usuários com Acesso</h4>
+                        {appUsers.map(u => (
+                          <div key={u.id} className="bg-slate-700/30 p-3 rounded-xl border border-slate-700/50 flex justify-between items-center">
+                            <div>
+                              <div className="font-bold text-sm text-white">{u.email}</div>
+                              <div className="text-[10px] text-slate-400 uppercase tracking-wider">{u.role}</div>
+                            </div>
+                            <button 
+                              onClick={() => removeAppUser(u.id)}
+                              className="text-red-400 hover:bg-red-900/30 p-2 rounded-lg transition"
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </div>
+                        ))}
+                        {appUsers.length === 0 && (
+                          <div className="text-xs text-slate-500 text-center py-2">
+                            Nenhum usuário extra configurado.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Logs Modal */}
+        <AnimatePresence>
+          {showLogsModal && (
+            <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.9 }}
+                className="bg-slate-800 rounded-3xl max-w-md w-full max-h-[80vh] border border-slate-700 shadow-2xl overflow-hidden flex flex-col"
+              >
+                <div className="p-6 border-b border-slate-700 flex justify-between items-center">
+                  <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                    <FileText size={20} className="text-orange-500" /> Log de Alterações
+                  </h3>
+                  <button onClick={() => setShowLogsModal(false)} className="text-slate-400 hover:text-white">
+                    <X size={20} />
+                  </button>
+                </div>
+                <div className="p-6 overflow-y-auto space-y-4">
+                  {usersData
+                    .filter(u => u.lastModifiedAt)
+                    .sort((a, b) => b.lastModifiedAt - a.lastModifiedAt)
+                    .map(u => (
+                      <div key={u.id} className="bg-slate-700/30 p-4 rounded-2xl border border-slate-700/50">
+                        <div className="flex justify-between items-start mb-2">
+                          <span className="font-bold text-white">{u.name}</span>
+                          <span className="text-[10px] text-slate-400">
+                            {new Date(u.lastModifiedAt).toLocaleString('pt-BR')}
+                          </span>
+                        </div>
+                        <div className="text-xs text-slate-400">
+                          Última modificação por: <span className="text-orange-400 font-medium">{u.lastModifiedByName || 'Desconhecido'}</span>
+                        </div>
+                      </div>
+                    ))}
+                  {usersData.filter(u => u.lastModifiedAt).length === 0 && (
+                    <div className="text-center text-slate-500 py-8">
+                      Nenhum registro de alteração encontrado.
                     </div>
                   )}
                 </div>
@@ -901,6 +1253,12 @@ export default function App() {
 
                 <div className="p-6 bg-slate-900/50 border-t border-slate-700 space-y-3">
                   <button 
+                    onClick={handleExportReport}
+                    className="w-full py-4 bg-orange-600 hover:bg-orange-500 text-white rounded-2xl font-bold transition shadow-lg shadow-orange-900/20 flex items-center justify-center gap-2"
+                  >
+                    <Copy size={20} /> Exportar Relatório
+                  </button>
+                  <button 
                     onClick={confirmCloseWeek}
                     className="w-full py-4 bg-red-600 hover:bg-red-500 text-white rounded-2xl font-bold transition shadow-lg shadow-red-900/20"
                   >
@@ -911,6 +1269,40 @@ export default function App() {
                     className="w-full py-4 text-slate-500 hover:text-white font-bold transition"
                   >
                     Cancelar
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Delete Confirmation Modal */}
+        <AnimatePresence>
+          {userToDelete && (
+            <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-[70] p-4">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.9 }}
+                className="bg-slate-800 rounded-3xl max-w-sm w-full border border-slate-700 shadow-2xl overflow-hidden p-6 text-center"
+              >
+                <AlertTriangle className="text-red-500 mx-auto mb-4" size={48} />
+                <h3 className="text-xl font-bold text-white mb-2">Excluir Atleta?</h3>
+                <p className="text-slate-400 text-sm mb-6">
+                  Tem certeza que deseja remover este atleta permanentemente? Esta ação não pode ser desfeita.
+                </p>
+                <div className="flex gap-3">
+                  <button 
+                    onClick={() => setUserToDelete(null)}
+                    className="flex-1 py-3 rounded-xl font-bold text-slate-300 bg-slate-700 hover:bg-slate-600 transition"
+                  >
+                    Cancelar
+                  </button>
+                  <button 
+                    onClick={confirmRemoveUser}
+                    className="flex-1 py-3 rounded-xl font-bold text-white bg-red-600 hover:bg-red-500 transition shadow-lg shadow-red-900/20"
+                  >
+                    Excluir
                   </button>
                 </div>
               </motion.div>

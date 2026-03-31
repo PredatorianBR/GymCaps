@@ -23,6 +23,11 @@ service cloud.firestore {
     //   - icons: map
     //   - templates: map
     //
+    // Collection: app_users
+    // Fields:
+    //   - email: string
+    //   - role: string ('admin', 'editor', 'viewer')
+    //
     // ===============================================================
 
     // Helper Functions
@@ -32,11 +37,17 @@ service cloud.firestore {
 
     function isAdmin() {
       return isAuthenticated() && 
-        (request.auth.token.email == "davi.caseira@gmail.com" && request.auth.token.email_verified == true);
+        (
+          (request.auth.token.email == "davi.caseira@gmail.com" && request.auth.token.email_verified == true) ||
+          (exists(/databases/$(database)/documents/app_users/$(request.auth.token.email)) &&
+           get(/databases/$(database)/documents/app_users/$(request.auth.token.email)).data.role == 'admin')
+        );
     }
 
-    function isOwner(userId) {
-      return isAuthenticated() && (request.auth.uid == userId || request.auth.uid == resource.data.uid);
+    function isEditor() {
+      return isAdmin() || 
+        (exists(/databases/$(database)/documents/app_users/$(request.auth.token.email)) &&
+         get(/databases/$(database)/documents/app_users/$(request.auth.token.email)).data.role == 'editor');
     }
 
     function isValidUser(data) {
@@ -44,14 +55,16 @@ service cloud.firestore {
              data.target is number && data.target >= 1 && data.target <= 7;
     }
 
+    function isValidAppUser(data) {
+      return data.email is string && data.email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$") &&
+             data.role in ['admin', 'editor', 'viewer'];
+    }
+
     // Rules for gymrats_users
     match /gymrats_users/{userId} {
-      // Qualquer pessoa autenticada pode ler a lista de atletas (placar público do grupo)
       allow read: if isAuthenticated();
-      
-      // Apenas admins podem criar ou deletar usuários (ou o próprio usuário se implementarmos auto-registro)
-      allow create: if isAuthenticated() && isValidUser(request.resource.data);
-      allow update: if isAuthenticated() && isValidUser(request.resource.data);
+      allow create: if isEditor() && isValidUser(request.resource.data);
+      allow update: if isEditor() && isValidUser(request.resource.data);
       allow delete: if isAdmin();
     }
 
@@ -59,6 +72,13 @@ service cloud.firestore {
     match /app_settings/{settingId} {
       allow read: if isAuthenticated();
       allow write: if isAdmin();
+    }
+
+    // Rules for app_users
+    match /app_users/{email} {
+      allow read: if true; // Allow anyone to read so they can check their own role
+      allow write: if isAdmin() && isValidAppUser(request.resource.data);
+      allow delete: if isAdmin();
     }
   }
 }
