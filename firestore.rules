@@ -76,7 +76,7 @@ service cloud.firestore {
 
     // Rules for app_users
     match /app_users/{email} {
-      allow read: if isAuthenticated(); // Require login to read users list
+      allow read: if true; // Allow anyone to read so they can check their own role
       allow write: if isAdmin() && isValidAppUser(request.resource.data);
       allow delete: if isAdmin();
     }
